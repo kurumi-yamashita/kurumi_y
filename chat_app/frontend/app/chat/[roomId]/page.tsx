@@ -1,4 +1,4 @@
-// ✅ ChatRoomPage.tsx（read_by 対応）
+// ✅ ChatRoomPage.tsx（read_by 対応） ※ presence-read修正・最新messages対応版（前後半適用済）
 
 'use client';
 
@@ -31,6 +31,7 @@ export default function ChatRoomPage() {
   const roomId = Array.isArray(roomIdRaw) ? roomIdRaw[0] : roomIdRaw ?? '';
 
   const [messages, setMessages] = useState<Message[]>([]);
+  const messagesRef = useRef<Message[]>([]);
   const [text, setText] = useState('');
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [username, setUsername] = useState('');
@@ -63,25 +64,28 @@ export default function ChatRoomPage() {
   const handleMessage = useCallback((msg: Message) => {
     if (!msg) return;
 
-  if (msg.type === 'read') {
-    const readId = msg.client_id || '';
-    if (!seenReadIds.current.has(readId)) {
-      seenReadIds.current.add(readId);
-      console.log('👁 既読受信:', msg);
+    if (msg.type === 'read') {
+      const readId = msg.client_id || '';
+      if (!seenReadIds.current.has(readId)) {
+        seenReadIds.current.add(readId);
+        console.log('👁 既読受信:', msg);
 
-      setMessages(prev =>
-        prev.map(m => {
-          if (m.sender !== username) return m;
-          if (!m.read_by || m.read_by.includes(msg.userId!)) return m;
-          return {
-            ...m,
-            read_by: [...m.read_by, msg.userId!],
-          };
-        })
-      );
+        setMessages(prev => {
+          const updated = prev.map(m => {
+            if (m.sender === username && msg.userId && !m.read_by?.includes(msg.userId)) {
+              return {
+                ...m,
+                read_by: [...(m.read_by || []), msg.userId],
+              };
+            }
+            return m;
+          });
+          messagesRef.current = updated;
+          return updated;
+        });
+      }
+      return;
     }
-    return;
-  }
 
     if (!msg.client_id) {
       msg.client_id = `fallback-${uuidv4()}`;
@@ -102,10 +106,12 @@ export default function ChatRoomPage() {
 
       setMessages(prev => {
         if (prev.some(m => m.client_id === msg.client_id)) return prev;
-        return [...prev, newMsg];
+        const updated = [...prev, newMsg];
+        messagesRef.current = updated;
+        return updated;
       });
 
-      if (!isMine && shouldSendRead && isReadyRef.current && typeof sendMessageRef.current === 'function') {
+      if (!isMine && shouldSendRead && isReadyRef.current && presenceSent && typeof sendMessageRef.current === 'function') {
         const readClientId = `read-${userId}-${roomId}-${uuidv4()}`;
         seenReadIds.current.add(readClientId);
         const payload = {
@@ -118,20 +124,7 @@ export default function ChatRoomPage() {
         console.log('📤 新規追加直後read送信:', payload);
         sendMessageRef.current(payload);
       }
-    } else {
-      setMessages(prev => {
-        const index = prev.findIndex(m => m.client_id === msg.client_id);
-        if (index !== -1) {
-          const copy = [...prev];
-          copy[index] = { ...prev[index], ...newMsg };
-          return copy;
-        } else {
-          return prev;
-        }
-      });
     }
-
-    scrollToBottom();
   }, [username, userId, roomId, shouldSendRead]);
 
   const { sendMessage, isReady, disconnect } = useWebSocket(Number(roomId), handleMessage);
@@ -145,42 +138,45 @@ export default function ChatRoomPage() {
     shouldConnectNotify ? Number(roomId) : 0,
     shouldConnectNotify ? Number(userId) : 0,
     (notifyMsg) => {
-    const presenceKey = `${notifyMsg.type}-${notifyMsg.action}-${notifyMsg.userId}-${notifyMsg.roomId}`;
-    if (seenPresenceIds.current.has(presenceKey)) return;
-    seenPresenceIds.current.add(presenceKey);
+      const presenceKey = `${notifyMsg.type}-${notifyMsg.action}-${notifyMsg.userId}-${notifyMsg.roomId}`;
+      if (seenPresenceIds.current.has(presenceKey)) return;
+      seenPresenceIds.current.add(presenceKey);
 
-  if (
-    notifyMsg.type === 'presence' &&
-    notifyMsg.action === 'enter' &&
-    notifyMsg.roomId === Number(roomId) &&
-    notifyMsg.userId !== Number(userId)
-  ) {
-  if (
-    shouldSendRead &&
-    isReadyRef.current &&
-    presenceSent &&
-    typeof sendMessageRef.current === 'function'
-  ) {
-    const latestMsg = messages
-      .filter((m) => m.sender !== username)
-      .at(-1); // 🔍 最後の相手メッセージ
+      if (
+        notifyMsg.type === 'presence' &&
+        notifyMsg.action === 'enter' &&
+        notifyMsg.roomId === Number(roomId) &&
+        notifyMsg.userId !== Number(userId)
+      ) {
+        const trySendRead = () => {
+          const latestMsg = messagesRef.current
+            .filter((m) => m.sender !== username && m.id > 0)
+            .at(-1);
 
-    if (latestMsg) {
-      const readClientId = `read-${userId}-${roomId}-${uuidv4()}`;
-      seenReadIds.current.add(readClientId);
-      const payload = {
-        type: 'read',
-        roomId: Number(roomId),
-        userId: Number(userId),
-        client_id: readClientId,
-        messageId: latestMsg.id, // ✅ 定義済み
-      };
-      console.log('📤 presence経由read送信:', payload);
-      sendMessageRef.current(payload);
+          if (
+            latestMsg &&
+            !seenReadIds.current.has(`read-${userId}-${roomId}-${latestMsg.id}`)
+          ) {
+            const readClientId = `read-${userId}-${roomId}-${uuidv4()}`;
+            seenReadIds.current.add(readClientId);
+            const payload = {
+              type: 'read',
+              roomId: Number(roomId),
+              userId: Number(userId),
+              client_id: readClientId,
+              messageId: latestMsg.id,
+            };
+            console.log('📤 presence経由read送信（再試行含む）:', payload);
+            sendMessageRef.current(payload);
+          }
+        };
+
+        trySendRead();
+        setTimeout(trySendRead, 300);
+      }
     }
-  }
-  }
-  });
+  );
+
   console.log('✅ presenceSent:', presenceSent, 'notifyReady:', isNotifySocketReady);
 
   useEffect(() => {
@@ -232,14 +228,22 @@ export default function ChatRoomPage() {
               read_status: msg.sender === username ? msg.read_status : undefined,
               read_by: msg.read_by ?? [],
             }));
-        setMessages(filtered);
+        setMessages(() => {
+          messagesRef.current = filtered;
+          return filtered;
+        });
 
         // ルーム再入室で二重既読を避けるため、過去既読read_idもリセット
         seenClientIds.current = new Set(filtered.map(m => m.client_id!).filter(Boolean));
         seenReadIds.current = new Set();
 
           // 過去メッセージに対して read 送信
-          if (shouldSendRead && isReady && typeof sendMessageRef.current === 'function') {
+          if (
+            shouldSendRead &&
+            isReadyRef.current &&
+            presenceSent &&
+            typeof sendMessageRef.current === 'function'
+          ) {
             const latestMsg = filtered
               .filter((m: Message) => m.sender !== username)
               .at(-1); // 🔍 最後の相手メッセージを取得
@@ -301,7 +305,11 @@ export default function ChatRoomPage() {
       id: 0,
     };
 
-    setMessages(prev => [...prev, tempMsg]);
+    setMessages(prev => {
+      const updated = [...prev, tempMsg];
+      messagesRef.current = updated;
+      return updated;
+    });
     scrollToBottom();
 
     try {

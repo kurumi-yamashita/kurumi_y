@@ -148,6 +148,7 @@ func ChatHandler(w http.ResponseWriter, r *http.Request) {
 				alreadyReadUserIDs = append(alreadyReadUserIDs, uid)
 			}
 			readRows.Close()
+			msg.ReadBy = alreadyReadUserIDs
 
 			newlyAdded := 0
 			for uid, present := range roomUsers {

@@ -23,6 +23,7 @@ type ChatMessage struct {
 	Type       string   `json:"type,omitempty"`
 	UserID     int      `json:"userId,omitempty"`
 	ClientID   string   `json:"client_id,omitempty"`
+	ReadBy     []int    `json:"read_by"`
 }
 
 // WebSocket接続処理
@@ -219,6 +220,7 @@ func GetOwnedRooms(w http.ResponseWriter, r *http.Request) {
 }
 
 func CreateRoom(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w, r)
 	var req struct {
 		UserID   int    `json:"userId"`
 		RoomName string `json:"roomName"`
@@ -262,6 +264,7 @@ func CreateRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 func JoinRoom(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w, r)
 	var req struct {
 		UserID int `json:"userId"`
 		RoomID int `json:"roomId"`
@@ -294,6 +297,7 @@ func JoinRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 func LeaveRoom(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w, r)
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -380,6 +384,7 @@ func GetRoomName(w http.ResponseWriter, r *http.Request) {
 }
 
 func CreateOrGetOneToOneRoom(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w, r)
 	var req struct {
 		User1ID int `json:"user1Id"`
 		User2ID int `json:"user2Id"`

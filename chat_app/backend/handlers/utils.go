@@ -21,7 +21,7 @@ type Connection struct {
 
 var (
 	roomConns   = make(map[int][]*Connection)
-	globalConns = make([]*Connection, 0)
+	globalConns = sync.Map{} // ✅ sync.Map に修正
 	connMutex   = &sync.Mutex{}
 )
 
@@ -57,54 +57,47 @@ func BroadcastToRoom(roomID int, msg interface{}, exclude *Connection) {
 }
 
 func AddGlobalConnection(conn *Connection) {
-	connMutex.Lock()
-	defer connMutex.Unlock()
-	globalConns = append(globalConns, conn)
+	globalConns.Store(conn.UserID, conn)
 }
 
 func RemoveGlobalConnection(target *Connection) {
-	connMutex.Lock()
-	defer connMutex.Unlock()
-	for i, c := range globalConns {
-		if c == target {
-			globalConns = append(globalConns[:i], globalConns[i+1:]...)
-			break
+	globalConns.Range(func(key, value any) bool {
+		c, ok := value.(*Connection)
+		if ok && c == target {
+			globalConns.Delete(key)
+			return false
 		}
-	}
+		return true
+	})
 }
 
-func DisconnectExistingNotifyConnection(userID int) {
-	connMutex.Lock()
-	defer connMutex.Unlock()
-	for i, c := range globalConns {
-		if c.UserID == userID {
+func DisconnectExistingNotifyConnection(userID int, newConn *websocket.Conn) {
+	if existing, ok := globalConns.Load(userID); ok {
+		if existingConn, ok := existing.(*Connection); ok && existingConn.Conn != newConn {
 			log.Printf("⚠️ 既存Notify接続を切断: userID=%d", userID)
-			_ = c.Conn.Close()
-			globalConns = append(globalConns[:i], globalConns[i+1:]...)
-			break
+			existingConn.Conn.Close()
 		}
+		globalConns.Delete(userID)
 	}
 }
 
 func BroadcastGlobal(msg interface{}) {
-	connMutex.Lock()
-	defer connMutex.Unlock()
-	for _, c := range globalConns {
-		if err := c.Conn.WriteJSON(msg); err != nil {
-			log.Println("❌ グローバルWebSocket送信エラー:", err)
+	globalConns.Range(func(_, value any) bool {
+		c, ok := value.(*Connection)
+		if ok {
+			if err := c.Conn.WriteJSON(msg); err != nil {
+				log.Println("❌ グローバルWebSocket送信エラー:", err)
+			}
 		}
-	}
-}
-
-func WriteJSONError(w http.ResponseWriter, message string, status int) {
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
+		return true
+	})
 }
 
 var roomPresenceMap = make(map[int]map[int]bool)
 var presenceMutex = &sync.Mutex{}
 
 func NotifyWebSocketHandler(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w, r)
 	token := r.Header.Get("Sec-WebSocket-Protocol")
 	if token == "" {
 		log.Println("❌ トークンが空です")
@@ -119,11 +112,16 @@ func NotifyWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ヘッダー設定
-	w.Header().Set("Access-Control-Allow-Headers", "Sec-WebSocket-Protocol")
-	w.Header().Set("Sec-WebSocket-Protocol", token)
+	if !websocket.IsWebSocketUpgrade(r) {
+		log.Println("❌ WebSocketアップグレード失敗")
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
 
-	conn, err := upgrader.Upgrade(w, r, nil)
+	responseHeader := http.Header{}
+	responseHeader.Set("Sec-WebSocket-Protocol", r.Header.Get("Sec-WebSocket-Protocol"))
+
+	conn, err := upgrader.Upgrade(w, r, responseHeader)
 	if err != nil {
 		log.Println("❌ WebSocketアップグレード失敗:", err)
 		return
@@ -131,10 +129,16 @@ func NotifyWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 
 	userID := claims.UserID
 	username := claims.Username
-	c := &Connection{Conn: conn, UserID: userID}
+	c := &Connection{Conn: conn, UserID: userID, RoomID: 0}
 
-	DisconnectExistingNotifyConnection(userID)
+	DisconnectExistingNotifyConnection(userID, conn)
 	AddGlobalConnection(c)
+
+	conn.SetCloseHandler(func(code int, text string) error {
+		log.Printf("🔌 Notify WebSocket切断: code=%d, reason=%s", code, text)
+		return nil
+	})
+
 	log.Println("📡 Notify WebSocket接続:", username)
 
 	defer func() {
@@ -148,11 +152,7 @@ func NotifyWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("❌ 異常切断: %v", err)
-			} else {
-				log.Printf("🔌 通常切断: %v", err)
-			}
+			log.Println("❌ WebSocketメッセージの読み取りエラー:", err)
 			break
 		}
 
@@ -162,7 +162,7 @@ func NotifyWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		log.Printf("🔔 通知受信: userID=%d, sender=%s, clientID=%v, roomId=%v, type=%v, action=%v\n",
+		log.Printf("🔔 通知受信: userID=%d, sender=%s, clientID=%v, roomId=%v, type=%v, action=%v",
 			userID, username, parsed["client_id"], parsed["roomId"], parsed["type"], parsed["action"])
 
 		if parsed["type"] == "presence" {
@@ -173,7 +173,7 @@ func NotifyWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			roomIdFloat, ok := roomIdAny.(float64)
 			if !ok {
-				log.Println("❌ roomIdの形式がfloat64でない:", roomIdAny)
+				log.Println("❌ roomId形式不正:", roomIdAny)
 				continue
 			}
 			roomId := int(roomIdFloat)
@@ -212,5 +212,26 @@ func removeFromAllRooms(userId int) {
 	defer presenceMutex.Unlock()
 	for _, members := range roomPresenceMap {
 		delete(members, userId)
+	}
+}
+
+func WriteJSONError(w http.ResponseWriter, message string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	response := map[string]string{"error": message}
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Println("❌ JSONエンコードエラー:", err)
+	}
+}
+
+func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
 	}
 }

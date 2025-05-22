@@ -1,149 +1,128 @@
 // utils/useWebSocketNotify.ts
-'use client';
-import { useEffect, useRef, useState, useCallback } from 'react';
-import { usePathname } from 'next/navigation';
+
+import { useEffect, useRef, useState } from 'react';
 
 type NotifyMessage = {
-  type: string;
+  type: 'presence' | 'ping';
   action?: 'enter' | 'leave';
-  roomId?: number;
   userId?: number;
+  roomId?: number;
 };
 
-const NOTIFY_KEY = 'global-notify';
-const notifyMap: Map<string, WebSocket> = new Map();
-
 export function useWebSocketNotify(
-  onMessage?: (msg: any) => void
-): { isReady: boolean; sendNotify: (msg: NotifyMessage) => void } {
+  roomId: number,
+  userId: number,
+  onMessage: (msg: NotifyMessage) => void
+) {
   const [isReady, setIsReady] = useState(false);
-  const wsRef = useRef<WebSocket | null>(null);
-  const pathnameRef = useRef<string>('');
-  const lastActionRef = useRef<string | null>(null);
-  const currentPathname = usePathname();
-  const retryCountRef = useRef(0);
-  const maxRetry = 5;
+  const [presenceSent, setPresenceSent] = useState(false);
+  const socketRef = useRef<WebSocket | null>(null);
+  const manualCloseRef = useRef(false);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const sendNotify = useCallback((msg: NotifyMessage) => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.warn('⚠️ Notify WebSocket未接続: メッセージ送信失敗', msg);
-      return;
-    }
+  const shouldConnect =
+    roomId > 0 &&
+    userId > 0 &&
+    !Number.isNaN(roomId) &&
+    !Number.isNaN(userId);
 
-    if (
-      msg.type === 'presence' &&
-      (msg.action === 'enter' || msg.action === 'leave') &&
-      !pathnameRef.current.startsWith('/chat')
-    ) {
-      console.log('🚫 チャット画面外のため presence 通知スキップ:', msg);
-      return;
-    }
+  const connect = () => {
+    const token = localStorage.getItem('token');
+    if (!token || !shouldConnect) return;
 
-    if (msg.type === 'presence' && msg.action === lastActionRef.current) {
-      console.log('⛔️ 重複presence通知をスキップ:', msg);
-      return;
-    }
-
-    if (
-      msg.type === 'presence' &&
-      (msg.roomId == null || msg.userId == null)
-    ) {
-      console.warn('🚫 トークンまたは userId/roomId 不足：', msg);
-      return;
-    }
-
-    lastActionRef.current = msg.action || null;
-    console.log('📤 Notify送信:', msg);
-    ws.send(JSON.stringify(msg));
-  }, []);
-
-  const connect = useCallback(() => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
-    const uid = typeof window !== 'undefined' ? localStorage.getItem('userId') : null;
-    const userId = Number(uid);
-
-    if (!token || !uid || isNaN(userId)) {
-      console.warn('⛔ 無効な token または userId により Notify 接続を中止');
-      return;
-    }
-
-    const ws = new WebSocket('ws://localhost:8080/ws/notify', [token]);
-    wsRef.current = ws;
-    notifyMap.set(NOTIFY_KEY, ws);
+    const ws = new WebSocket(`ws://localhost:8080/ws/notify`, token);
+    socketRef.current = ws;
 
     ws.onopen = () => {
-      console.log('📡 Notify WebSocket接続成功');
+      console.log('🟢 Notify WebSocket接続成功');
       setIsReady(true);
-      retryCountRef.current = 0;
+      const presencePayload = {
+        type: 'presence',
+        action: 'enter',
+        userId,
+        roomId,
+      };
+      ws.send(JSON.stringify(presencePayload));
+      console.log('📤 presence送信:', presencePayload);
+      setPresenceSent(true);
     };
 
-    ws.onmessage = (e) => {
+    ws.onmessage = (event) => {
       try {
-        const text = typeof e.data === 'string' ? e.data.trim() : '';
-        if (!text || text === 'ping') return;
-        const data = JSON.parse(text);
-        console.log('🔔 通知受信:', data);
-        onMessage?.(data);
+        const msg = JSON.parse(event.data);
+        if (msg?.type === 'presence' || msg?.type === 'ping') {
+          onMessage(msg);
+        }
       } catch (err) {
-        console.error('❌ 通知パースエラー:', err, '受信内容:', e.data);
+        console.error('❌ 通知メッセージ解析失敗:', err);
       }
     };
 
-    ws.onerror = (e) => {
-      console.error('❌ Notify WebSocket エラー:', e);
-    };
-
-    ws.onclose = (e) => {
-      console.warn('🔌 Notify WebSocket切断:', e.code, e.reason);
+    ws.onclose = (event) => {
+      console.warn('🔌 Notify WebSocket切断:', event.code, event.reason);
       setIsReady(false);
-      notifyMap.delete(NOTIFY_KEY);
+      setPresenceSent(false);
+      socketRef.current = null;
 
-      if (retryCountRef.current < maxRetry) {
-        const delay = 1000 * Math.pow(2, retryCountRef.current);
-        console.log(`🔁 再接続リトライ ${retryCountRef.current + 1}回目：${delay}ms後`);
-        retryCountRef.current += 1;
-        setTimeout(connect, delay);
-      } else {
-        console.error('🛑 再接続試行上限に達しました');
+      if (manualCloseRef.current) return;
+
+      // 再接続を一定時間遅らせて無限ループを回避
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
       }
+      reconnectTimeoutRef.current = setTimeout(() => {
+        console.log('♻️ Notify WebSocket再接続...');
+        connect();
+      }, 3000);
     };
-  }, [onMessage]);
 
-  useEffect(() => {
-    pathnameRef.current = currentPathname;
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      const uid = localStorage.getItem('userId');
-      const userId = Number(uid);
-      const roomId = parseInt(currentPathname.split('/chat/')[1]) || undefined;
-      const action = currentPathname.startsWith('/chat') ? 'enter' : 'leave';
-      sendNotify({ type: 'presence', action, userId, roomId });
-    }
-  }, [currentPathname, sendNotify]);
+    ws.onerror = (err) => {
+      console.error('❌ Notify WebSocketエラー:', err);
+      ws.close();
+    };
+  };
 
-  useEffect(() => {
-    if (notifyMap.get(NOTIFY_KEY)?.readyState === WebSocket.OPEN) {
-      wsRef.current = notifyMap.get(NOTIFY_KEY)!;
-      setIsReady(true);
-      return;
-    }
-
-    connect();
-
-    const handleUnload = () => {
+  const disconnect = () => {
+    manualCloseRef.current = true;
+    if (socketRef.current) {
+      const leavePayload = {
+        type: 'presence',
+        action: 'leave',
+        userId,
+        roomId,
+      };
       try {
-        const uid = localStorage.getItem('userId');
-        const userId = Number(uid);
-        const roomId = parseInt(pathnameRef.current.split('/chat/')[1]) || undefined;
-        sendNotify({ type: 'presence', action: 'leave', userId, roomId });
-      } catch (_) {}
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.close();
+        socketRef.current.send(JSON.stringify(leavePayload));
+        console.log('📤 presence離脱送信:', leavePayload);
+      } catch (e) {
+        console.warn('⚠️ 離脱送信失敗:', e);
+      }
+      socketRef.current.close();
+    }
+    setIsReady(false);
+    setPresenceSent(false);
+    socketRef.current = null;
+  };
+
+  const sendNotify = (msg: NotifyMessage) => {
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify(msg));
+    }
+  };
+
+  useEffect(() => {
+    if (shouldConnect) {
+      manualCloseRef.current = false;
+      connect();
+    }
+
+    return () => {
+      disconnect();
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
       }
     };
-    window.addEventListener('beforeunload', handleUnload);
-    return () => window.removeEventListener('beforeunload', handleUnload);
-  }, [connect, sendNotify]);
+  }, [roomId, userId]);
 
-  return { isReady, sendNotify };
+  return { isReady, sendNotify, disconnect, presenceSent };
 }
