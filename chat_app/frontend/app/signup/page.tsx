@@ -3,6 +3,7 @@
 import { useForm } from 'react-hook-form';           // 入力バリデーション用ライブラリ
 import { useRouter } from 'next/navigation';         // ページ遷移用フック
 import { useState } from 'react';                    // Reactの状態管理フック
+import { FiChevronLeft } from 'react-icons/fi';  // ← 戻るボタン用アイコンを追加
 
 // 入力フォームで扱うデータの型
 type FormData = {
@@ -55,12 +56,16 @@ export default function SignupPage() {
       boxShadow: '0 4px 8px rgba(0, 0, 0, 0.1)'
     }}>
       {/* 見出し */}
+      <div style={{ display: 'flex', alignItems: 'center', marginBottom: '20px' }}>
+        <FiChevronLeft size={20} onClick={() => router.push('/')}
+          style={{ cursor: 'pointer', marginRight: '8px', marginTop: '-24px', color: '#2563eb' }}
+          title="トップページに戻る" />
       <h1 style={{
         fontSize: '24px',
         fontWeight: 'bold',
         marginBottom: '24px'
       }}>サインアップ</h1>
-
+    </div>
       {/* 入力フォーム開始 */}
       <form onSubmit={handleSubmit(onSubmit)}>
         {/* ユーザー名入力 */}

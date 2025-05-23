@@ -106,10 +106,15 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			// ✅ roomPresenceMap ログの追加（parsed不要）
 			roomID := msg.RoomID
 			presence := false
-			if m, exists := roomPresenceMap[roomID]; exists {
-				presence = m[userID]
+			if m, exists := roomPresenceMap[msg.RoomID]; exists {
+				presence = m[msg.UserID]
 			}
 			log.Printf("🧪 roomPresenceMap確認: roomId=%d, userId=%d, presence=%v", roomID, userID, presence)
+
+			if !presence {
+				log.Printf("⚠️ ユーザーはroomPresenceMap上に存在しないため、message_readsへの挿入をスキップします")
+				return
+			}
 
 			go func(userID, roomID int) {
 				_, err := DB.Exec(`
@@ -212,9 +217,14 @@ func GetOwnedRooms(w http.ResponseWriter, r *http.Request) {
 	var rooms []Room
 	for rows.Next() {
 		var room Room
-		if err := rows.Scan(&room.ID, &room.Name, &room.IsGroup, &room.MemberCnt, &room.UnreadCount); err == nil {
+		if err := rows.Scan(&room.ID, &room.Name, &room.MemberCnt, &room.IsGroup); err == nil {
 			rooms = append(rooms, room)
 		}
+	}
+
+	// 明示的に空配列でも [] を返すようにする
+	if rooms == nil {
+		rooms = []Room{}
 	}
 	json.NewEncoder(w).Encode(rooms)
 }
@@ -451,14 +461,15 @@ func GetAvailableRooms(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := DB.Query(`
-		SELECT r.id, r.room_name, r.is_group,
+	SELECT r.id, 
+			COALESCE(NULLIF(r.room_name, ''), '') AS name,
 			(SELECT COUNT(*) FROM room_members WHERE room_id = r.id) AS member_count,
-			0 AS unread_count
+			r.is_group
 		FROM chat_rooms r
-		WHERE r.is_group = 1
-		AND r.id NOT IN (
-			SELECT room_id FROM room_members WHERE user_id = $1
+		WHERE r.id NOT IN (
+		SELECT room_id FROM room_members WHERE user_id = $1
 		)
+		ORDER BY r.is_group DESC, r.id
 	`, userID)
 	if err != nil {
 		writeJSONError(w, "DB取得エラー", http.StatusInternalServerError)
@@ -469,10 +480,14 @@ func GetAvailableRooms(w http.ResponseWriter, r *http.Request) {
 	var rooms []Room
 	for rows.Next() {
 		var room Room
-		if err := rows.Scan(&room.ID, &room.Name, &room.IsGroup, &room.MemberCnt, &room.UnreadCount); err == nil {
+		if err := rows.Scan(&room.ID, &room.Name, &room.MemberCnt, &room.IsGroup); err == nil {
 			rooms = append(rooms, room)
 		}
 	}
 
+	// 明示的に空配列でも [] を返すようにする
+	if rooms == nil {
+		rooms = []Room{}
+	}
 	json.NewEncoder(w).Encode(rooms)
 }

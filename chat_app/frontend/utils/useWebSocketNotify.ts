@@ -48,10 +48,12 @@ export function useWebSocketNotify(
     };
 
     ws.onmessage = (event) => {
+      console.log('🔵 notify WebSocketメッセージ受信:', event.data);
       try {
         const msg = JSON.parse(event.data);
-        if (msg?.type === 'presence' || msg?.type === 'ping') {
-          onMessage(msg);
+        console.log('🟢 notify parsed msg:', msg);
+        if ((msg?.type === 'presence' || msg?.type === 'ping') && presenceSent) {
+          onMessage(msg); // ✅ presenceSent が true のときだけ発火
         }
       } catch (err) {
         console.error('❌ 通知メッセージ解析失敗:', err);
@@ -107,6 +109,12 @@ export function useWebSocketNotify(
   const sendNotify = (msg: NotifyMessage) => {
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify(msg));
+
+      // presence enter のときに presenceSent を true にする
+      if (msg.type === 'presence' && msg.action === 'enter') {
+        console.log('✅ presence enter 送信完了 ⇒ presenceSent = true');
+        setPresenceSent(true);
+      }
     }
   };
 

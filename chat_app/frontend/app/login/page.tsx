@@ -3,6 +3,7 @@
 import { useForm } from 'react-hook-form';        // フォームバリデーション用ライブラリ
 import { useRouter } from 'next/navigation';      // ページ遷移用のフック
 import { useState } from 'react';                 // Reactの状態管理用フック
+import { FiChevronLeft } from 'react-icons/fi';  // ← 戻るボタン用アイコンを追加
 
 // フォームで扱う入力データの型定義
 type FormData = {
@@ -61,12 +62,16 @@ export default function LoginPage() {
       boxShadow: '0 4px 8px rgba(0,0,0,0.1)'
     }}>
       {/* 見出し */}
+      <div style={{ display: 'flex', alignItems: 'center', marginBottom: '20px' }}>
+        <FiChevronLeft size={20} onClick={() => router.push('/')}
+          style={{ cursor: 'pointer', marginRight: '8px', marginTop: '-24px', color: '#2563eb' }}
+          title="トップページに戻る" />
       <h1 style={{
         fontSize: '24px',
         fontWeight: 'bold',
         marginBottom: '24px'
       }}>ログイン</h1>
-
+    </div>
       {/* ログインフォーム */}
       <form onSubmit={handleSubmit(onSubmit)}>
         {/* メールアドレス入力 */}

@@ -72,9 +72,16 @@ export default function RoomSelection() {
       if (!userRes.ok || !joinRes.ok) throw new Error('API error');
       const userData: Room[] = await userRes.json();
       const joinData: Room[] = await joinRes.json();
-      setGroupRooms(userData.filter(r => r.is_group === 1));
-      setOneToOneRooms(userData.filter(r => r.is_group === 0));
-      setJoinableRooms(joinData);
+      const groupOnly = (joinData ?? []).filter(r => r.is_group === 1);
+
+      if (!Array.isArray(userData)) throw new Error('userData is not array');
+
+      const group = ((userData ?? []).filter(r => r.is_group === 1));
+      const oneToOne = ((userData ?? []).filter(r => r.is_group === 0));
+
+      setGroupRooms(group);
+      setOneToOneRooms(oneToOne); // ← 新しく 1on1 専用 state に分離表示
+      setJoinableRooms(groupOnly);
     } catch (err) {
       console.error('❌ fetchRooms失敗:', err);
       setGroupRooms([]);
