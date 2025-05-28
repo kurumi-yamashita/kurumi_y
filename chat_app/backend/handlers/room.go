@@ -13,17 +13,25 @@ var roomClients = make(map[int]map[*websocket.Conn]bool)
 var broadcast = make(chan ChatMessage)
 
 type ChatMessage struct {
-	ID         int      `json:"id"`
-	Text       string   `json:"text"`
-	Sender     string   `json:"sender"`
-	ReadCount  int      `json:"read_count,omitempty"`
-	ReadStatus string   `json:"read_status,omitempty"`
-	Images     []string `json:"images,omitempty"`
-	RoomID     int      `json:"room_id,omitempty"`
-	Type       string   `json:"type,omitempty"`
-	UserID     int      `json:"userId,omitempty"`
-	ClientID   string   `json:"client_id,omitempty"`
-	ReadBy     []int    `json:"read_by"`
+	ID         int          `json:"id"`
+	Text       string       `json:"text"`
+	Sender     string       `json:"sender"`
+	Images     []string     `json:"images"`
+	ReadCount  int          `json:"read_count"`
+	ClientID   string       `json:"client_id"`
+	RoomID     int          `json:"roomId"`
+	UserID     int          `json:"userId"`
+	Type       string       `json:"type"`
+	Content    string       `json:"content,omitempty"`
+	ReadBy     []int        `json:"read_by"`
+	ReadStatus string       `json:"read_status,omitempty"`
+	ReplyTo    *ReplyToInfo `json:"replyTo,omitempty"`
+}
+
+type ReplyToInfo struct {
+	Name     string `json:"name"`
+	Text     string `json:"text"`
+	ClientID string `json:"client_id,omitempty"`
 }
 
 // WebSocket接続処理
@@ -112,25 +120,33 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			log.Printf("🧪 roomPresenceMap確認: roomId=%d, userId=%d, presence=%v", roomID, userID, presence)
 
 			if !presence {
-				log.Printf("⚠️ ユーザーはroomPresenceMap上に存在しないため、message_readsへの挿入をスキップします")
-				return
+				log.Printf("⚠️ userID=%d は roomPresenceMap に存在していませんが、read 処理は続行します", msg.UserID)
 			}
 
-			go func(userID, roomID int) {
+			go func(userID, roomID, messageID int) {
 				_, err := DB.Exec(`
 					INSERT INTO message_reads (user_id, message_id)
-					SELECT $1, m.id
-					FROM messages m
-					WHERE m.room_id = $2
-					AND m.sender_id != $1
-					AND NOT EXISTS (
-						SELECT 1 FROM message_reads mr WHERE mr.user_id = $1 AND mr.message_id = m.id
-					)
-				`, userID, roomID)
+					VALUES ($1, $2)
+					ON CONFLICT DO NOTHING
+				`, userID, messageID)
 				if err != nil {
 					log.Printf("❌ message_reads 挿入失敗: %v", err)
 				}
-			}(msg.UserID, msg.RoomID)
+			}(msg.UserID, msg.RoomID, msg.ID)
+
+			// 個別 messageId に対して read を保存する方式に戻す
+			go func(userID, messageID int) {
+				_, err := DB.Exec(`
+				INSERT INTO message_reads (user_id, message_id)
+				SELECT $1, $2
+				WHERE NOT EXISTS (
+				SELECT 1 FROM message_reads WHERE user_id = $1 AND message_id = $2
+				)
+			`, userID, messageID)
+				if err != nil {
+					log.Printf("❌ message_reads 挿入失敗: %v", err)
+				}
+			}(msg.UserID, msg.ID) // クライアントから送られてきた1件分のmessageId
 
 			msg.Text = ""
 			msg.Images = nil
@@ -138,6 +154,12 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		case "ping":
 			log.Println("📡 ping受信（切断防止）")
 		case "message", "":
+			broadcast <- msg
+		case "deleted", "delete":
+			log.Printf("🗑 通知: type=%s をブロードキャストします", msg.Type)
+			broadcast <- msg
+		case "stamp":
+			log.Println("💮 スタンプ受信: ", msg.Content)
 			broadcast <- msg
 		default:
 			log.Printf("⚠️ 未知のType: %s", msg.Type)
@@ -163,7 +185,6 @@ func StartBroadcaster() {
 // 任意の関数から送信するブロードキャスト関数
 func BroadcastMessage(roomID int, msg ChatMessage) {
 	msg.RoomID = roomID
-	msg.Type = "message"
 	broadcast <- msg
 }
 
@@ -217,7 +238,7 @@ func GetOwnedRooms(w http.ResponseWriter, r *http.Request) {
 	var rooms []Room
 	for rows.Next() {
 		var room Room
-		if err := rows.Scan(&room.ID, &room.Name, &room.MemberCnt, &room.IsGroup); err == nil {
+		if err := rows.Scan(&room.ID, &room.Name, &room.IsGroup, &room.MemberCnt, &room.UnreadCount); err == nil {
 			rooms = append(rooms, room)
 		}
 	}
@@ -462,14 +483,16 @@ func GetAvailableRooms(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := DB.Query(`
 	SELECT r.id, 
-			COALESCE(NULLIF(r.room_name, ''), '') AS name,
-			(SELECT COUNT(*) FROM room_members WHERE room_id = r.id) AS member_count,
-			r.is_group
-		FROM chat_rooms r
-		WHERE r.id NOT IN (
+	       r.room_name,
+	       (SELECT COUNT(*) FROM room_members WHERE room_id = r.id) AS member_count,
+	       r.is_group
+	FROM chat_rooms r
+	WHERE r.id NOT IN (
 		SELECT room_id FROM room_members WHERE user_id = $1
-		)
-		ORDER BY r.is_group DESC, r.id
+	)
+	AND r.is_group = 1
+	AND COALESCE(NULLIF(r.room_name, ''), '') != ''
+	ORDER BY r.id
 	`, userID)
 	if err != nil {
 		writeJSONError(w, "DB取得エラー", http.StatusInternalServerError)
@@ -485,7 +508,6 @@ func GetAvailableRooms(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 明示的に空配列でも [] を返すようにする
 	if rooms == nil {
 		rooms = []Room{}
 	}

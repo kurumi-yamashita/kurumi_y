@@ -33,6 +33,7 @@ func main() {
 	// チャット関連
 	mux.HandleFunc("/api/chat", handlers.ChatHandler)
 	mux.HandleFunc("/api/upload", handlers.UploadHandler)
+	mux.HandleFunc("/api/message/delete", handlers.DeleteMessageHandler)
 
 	// ルーム管理
 	mux.HandleFunc("/api/rooms/owned", handlers.GetOwnedRooms)
