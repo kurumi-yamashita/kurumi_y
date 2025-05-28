@@ -114,6 +114,7 @@ func ChatHandler(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, "メッセージ保存エラー", http.StatusInternalServerError)
 			return
 		}
+		log.Printf("✅ メッセージ保存成功: id=%d, client_id=%s", msgID, input.ClientID)
 
 		for _, image := range input.Images {
 			_, _ = DB.Exec(`

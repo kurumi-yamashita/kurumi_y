@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -13,19 +14,20 @@ var roomClients = make(map[int]map[*websocket.Conn]bool)
 var broadcast = make(chan ChatMessage)
 
 type ChatMessage struct {
-	ID         int          `json:"id"`
-	Text       string       `json:"text"`
-	Sender     string       `json:"sender"`
-	Images     []string     `json:"images"`
-	ReadCount  int          `json:"read_count"`
-	ClientID   string       `json:"client_id"`
-	RoomID     int          `json:"roomId"`
-	UserID     int          `json:"userId"`
-	Type       string       `json:"type"`
-	Content    string       `json:"content,omitempty"`
-	ReadBy     []int        `json:"read_by"`
-	ReadStatus string       `json:"read_status,omitempty"`
-	ReplyTo    *ReplyToInfo `json:"replyTo,omitempty"`
+	ID              int          `json:"id"`
+	Text            string       `json:"text"`
+	Sender          string       `json:"sender"`
+	Images          []string     `json:"images"`
+	ReadCount       int          `json:"read_count"`
+	ClientID        string       `json:"client_id"`
+	MessageClientID string       `json:"message_client_id"`
+	RoomID          int          `json:"roomId"`
+	UserID          int          `json:"userId"`
+	Type            string       `json:"type"`
+	Content         string       `json:"content,omitempty"`
+	ReadBy          []int        `json:"read_by"`
+	ReadStatus      string       `json:"read_status,omitempty"`
+	ReplyTo         *ReplyToInfo `json:"replyTo,omitempty"`
 }
 
 type ReplyToInfo struct {
@@ -111,7 +113,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		switch msg.Type {
 		case "read":
 			log.Printf("📨 既読通知受信: userID=%d, sender=%s, clientID=%s, roomId=%d", msg.UserID, msg.Sender, msg.ClientID, msg.RoomID)
-			// ✅ roomPresenceMap ログの追加（parsed不要）
+
 			roomID := msg.RoomID
 			presence := false
 			if m, exists := roomPresenceMap[msg.RoomID]; exists {
@@ -119,38 +121,43 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Printf("🧪 roomPresenceMap確認: roomId=%d, userId=%d, presence=%v", roomID, userID, presence)
 
-			if !presence {
-				log.Printf("⚠️ userID=%d は roomPresenceMap に存在していませんが、read 処理は続行します", msg.UserID)
+			messageID := msg.ID
+
+			// 🔽 追加：client_id から ID を補完
+			if messageID == 0 && msg.MessageClientID != "" {
+				const maxRetry = 10
+				for i := 0; i < maxRetry; i++ {
+					err := DB.QueryRow(`SELECT id FROM messages WHERE client_id = $1`, msg.MessageClientID).Scan(&messageID)
+					if err == nil {
+						log.Printf("✅ message_client_id → id 補完成功（%d回目）: %d", i+1, messageID)
+						break
+					}
+					log.Printf("⏳ message_client_id → id 補完リトライ中（%d回目）: %v", i+1, err)
+					time.Sleep(200 * time.Millisecond)
+				}
+
+				if messageID == 0 {
+					log.Println("⚠️ 最終的に messageID が取得できなかったため read をスキップします。client_id:", msg.ClientID)
+				} else {
+					go func(userID, messageID int) {
+						_, err := DB.Exec(`
+						INSERT INTO message_reads (user_id, message_id)
+						SELECT $1, $2
+						WHERE NOT EXISTS (
+							SELECT 1 FROM message_reads WHERE user_id = $1 AND message_id = $2
+						)
+					`, userID, messageID)
+						if err != nil {
+							log.Printf("❌ message_reads 挿入失敗: %v", err)
+						}
+					}(msg.UserID, messageID)
+				}
 			}
-
-			go func(userID, roomID, messageID int) {
-				_, err := DB.Exec(`
-					INSERT INTO message_reads (user_id, message_id)
-					VALUES ($1, $2)
-					ON CONFLICT DO NOTHING
-				`, userID, messageID)
-				if err != nil {
-					log.Printf("❌ message_reads 挿入失敗: %v", err)
-				}
-			}(msg.UserID, msg.RoomID, msg.ID)
-
-			// 個別 messageId に対して read を保存する方式に戻す
-			go func(userID, messageID int) {
-				_, err := DB.Exec(`
-				INSERT INTO message_reads (user_id, message_id)
-				SELECT $1, $2
-				WHERE NOT EXISTS (
-				SELECT 1 FROM message_reads WHERE user_id = $1 AND message_id = $2
-				)
-			`, userID, messageID)
-				if err != nil {
-					log.Printf("❌ message_reads 挿入失敗: %v", err)
-				}
-			}(msg.UserID, msg.ID) // クライアントから送られてきた1件分のmessageId
 
 			msg.Text = ""
 			msg.Images = nil
 			broadcast <- msg
+
 		case "ping":
 			log.Println("📡 ping受信（切断防止）")
 		case "message", "":

@@ -20,6 +20,8 @@ type Message = {
   client_id?: string;
   content?: string;
   roomId?: number;
+  messageId?: number;
+  message_client_id?: string;
   replyTo?: {
     name: string;
     text: string;
@@ -162,10 +164,10 @@ export default function ChatRoomPage() {
     };
 
   return [
-    { label: 'リプライ', show: !(isImage || isStamp) },
     { label: 'コピー', show: !(isImage || isStamp) },
-    { label: '消去', show: true },
-    { label: '送信取消', show: isMe },
+    { label: '消去', show: isText || isImage || isStamp },
+    { label: '送信取消', show: isMe && (isText || isImage || isStamp) },
+    // { label: 'リプライ', show: !(isImage || isStamp) },
   ]
       .filter((item) => item.show)
       .map((item) => ({
@@ -348,30 +350,35 @@ export default function ChatRoomPage() {
     (msg: Message) => {
       if (!msg) return;
 
-      // ✅ 既読処理
+      const isMine = msg.sender === usernameRef.current;
+
+      // ✅ read 受信処理
       if (msg.type === 'read') {
-        const readId = msg.client_id || '';
-        if (!seenReadIds.current.has(readId)) {
-          seenReadIds.current.add(readId);
+        const readClientId = msg.client_id || '';
+        if (!seenReadIds.current.has(readClientId)) {
+          seenReadIds.current.add(readClientId);
           console.log('👁 既読受信:', msg);
 
           setMessages((prev) => {
             const updated = prev.map((m) => {
-              // read_by が存在しなければ空配列に初期化
               const currentReadBy = m.read_by || [];
 
+              console.log(`📌 比較: m.client_id=${m.client_id}, msg.message_client_id=${msg.message_client_id}, m.sender=${m.sender}`);
+
+              // ✅ message_client_id を使って比較（client_id ではなく）
               if (
-                m.sender === usernameRef.current &&
+                (m.client_id === msg.message_client_id || m.message_client_id === msg.message_client_id) &&
                 msg.userId &&
                 !currentReadBy.includes(msg.userId)
               ) {
+                console.log(`✅ 既読追加: msg.id=${m.id}, userId=${msg.userId}`);
                 return {
                   ...m,
                   read_by: [...currentReadBy, msg.userId],
                 };
               }
 
-              // 読み取り対象じゃなくても read_by が undefined なら初期化しておく（UI反映の安定化）
+              // ✅ read_by が未定義なら空配列で補完（UIで参照エラー防止）
               if (!m.read_by) {
                 return {
                   ...m,
@@ -381,6 +388,7 @@ export default function ChatRoomPage() {
 
               return m;
             });
+
             messagesRef.current = updated;
             return updated;
           });
@@ -388,14 +396,13 @@ export default function ChatRoomPage() {
         return;
       }
 
-      // ✅ 消去（delete）受信時
+      // ✅ 消去・取消系
       if (msg.type === 'delete') {
         console.log('🗑 消去を受信:', msg.client_id);
         setMessages((prev) => prev.filter((m) => m.client_id !== msg.client_id));
         return;
       }
 
-      // ✅ 送信取消（deleted）受信時
       if (msg.type === 'deleted') {
         console.log('🚫 送信取消を受信:', msg.client_id);
         setMessages((prev) =>
@@ -403,7 +410,7 @@ export default function ChatRoomPage() {
             m.client_id === msg.client_id
               ? {
                   ...m,
-                  type: "deleted",
+                  type: 'deleted',
                   text: `${msg.sender}が送信を取り消しました`,
                   images: [],
                 }
@@ -413,43 +420,11 @@ export default function ChatRoomPage() {
         return;
       }
 
-      // ✅ スタンプメッセージ専用処理（再入室後の表示に必要）
-      if (msg.type === "stamp") {
-        console.log("🧸 stamp message client_id:", msg.client_id, "msg:", msg);
-        const isMine = msg.sender === username;
-
-        msg.images = [`/Stamps/${msg.content}`];
-
-        setMessages((prev) => [...prev, msg]);
-
-        // スタンプでも既読を送信する（自分以外のメッセージに対して）
-        if (
-          !isMine &&
-          shouldSendReadRef.current &&
-          isReadyRef.current &&
-          presenceSentRef.current &&
-          typeof sendMessageRef.current === 'function'
-        ) {
-          const readClientId = `read-${userId}-${roomId}-${uuidv4()}`;
-          seenReadIds.current.add(readClientId);
-          const payload = {
-            type: 'read',
-            roomId: Number(roomId),
-            userId: Number(userId),
-            client_id: readClientId,
-            messageId: msg.id,
-          };
-          console.log('📤 スタンプ受信時のread送信:', payload);
-          sendMessageRef.current(payload);
-        }
-      }
-
-      // 🔽 stamp タイプのときは images に明示的にURLを追加
+      // ✅ スタンプメッセージ処理
       if (msg.type === 'stamp' && msg.content) {
         msg.images = [`/Stamps/${msg.content}`];
       }
 
-      // ✅ 通常メッセージ処理
       if (!msg.client_id) {
         msg.client_id = `fallback-${uuidv4()}`;
       }
@@ -457,21 +432,21 @@ export default function ChatRoomPage() {
       const alreadySeen = seenClientIds.current.has(msg.client_id);
       if ((!msg.text || msg.text.trim() === '') && (!msg.images || msg.images.length === 0)) return;
 
-      const isMine = msg.sender === usernameRef.current;
-      console.log(
-        '🧪 sender比較: msg.sender =',
-        msg.sender,
-        ', username =',
-        usernameRef.current,
-        ', isMine =',
-        isMine
-      );
+      const isMineAfter = msg.sender === usernameRef.current;
+
+      if (!msg.sender || msg.sender === '') {
+        console.warn('⚠️ senderが空なのでread送信スキップ:', msg);
+        return;
+      }
 
       const newMsg: Message = {
         ...msg,
-        content: msg.type === "stamp" ? msg.text : msg.content,
-        read_status: isMine ? msg.read_status ?? '未読' : undefined,
+        content: msg.type === 'stamp' ? msg.text : msg.content,
+        read_status: isMineAfter ? msg.read_status ?? '未読' : undefined,
         read_by: msg.read_by ?? [],
+        client_id: msg.client_id ?? `fallback-${uuidv4()}`,
+        images:
+          msg.type === 'stamp' && msg.text ? [`/Stamps/${msg.text}`] : msg.images ?? [],
       };
 
       if (!alreadySeen && msg.client_id) {
@@ -507,43 +482,52 @@ export default function ChatRoomPage() {
           return updated;
         });
 
+        // ✅ 即時既読送信ロジック
         let retryCount = 0;
         const MAX_RETRY = 20;
 
         const trySendInstantRead = () => {
+          if (document.visibilityState === 'hidden' || !shouldSendReadRef.current) {
+            console.warn('🔕 非アクティブまたはshouldSendReadRef=falseのためread送信中断:', msg);
+            return;
+          }
+
+          if (!msg.sender || msg.sender === '') {
+            console.warn('⚠️ senderが空なのでread送信スキップ:', msg);
+            return;
+          }
+
           if (
-            !isMine &&
+            !isMineAfter &&
             shouldSendReadRef.current &&
             isReadyRef.current &&
             presenceSentRef.current &&
             typeof sendMessageRef.current === 'function'
           ) {
-            const readClientId = `read-${userId}-${roomId}-${uuidv4()}`;
-            seenReadIds.current.add(readClientId);
-            const payload = {
-              type: 'read',
-              roomId: Number(roomId),
-              userId: Number(userId),
-              client_id: readClientId,
-              messageId: msg.id,
-            };
-            console.log('📤 新規追加直後read送信:', payload);
-            sendMessageRef.current(payload);
+            if (msg.id > 0 && usernameRef.current) {
+              const readClientId = `read-${userId}-${roomId}-${uuidv4()}`;
+              seenReadIds.current.add(readClientId);
+              const payload = {
+                type: 'read',
+                roomId: Number(roomId),
+                userId: Number(userId),
+                client_id: readClientId,
+                message_client_id: msg.client_id,
+                messageId: msg.id,
+              };
+              console.log('📤 新規追加直後read送信:', payload);
+              sendMessageRef.current(payload);
+            } else if (retryCount < MAX_RETRY) {
+              retryCount++;
+              setTimeout(trySendInstantRead, 100);
+            } else {
+              console.warn('🔚 trySendInstantRead 最大リトライ到達（msg.id未定義）');
+            }
           } else if (retryCount < MAX_RETRY) {
             retryCount++;
-            console.warn(
-              `⏳ handleMessage未準備: retry = ${retryCount}, isMine=`,
-              isMine,
-              ', shouldSendRead=',
-              shouldSendReadRef.current,
-              ', isReady=',
-              isReadyRef.current,
-              ', presenceSent=',
-              presenceSentRef.current
-            );
             setTimeout(trySendInstantRead, 100);
           } else {
-            console.warn('🔚 trySendInstantRead 最大リトライ到達。read送信は中断します');
+            console.warn('🔚 trySendInstantRead 最大リトライ到達（準備未完了）');
           }
         };
 
@@ -610,6 +594,7 @@ export default function ChatRoomPage() {
           (m) =>
             m.sender !== username &&
             m.id > 0 &&
+            m.type !== 'deleted' &&
             !seenReadIds.current.has(`read-${userId}-${roomId}-${m.id}`) &&
             m.type !== 'deleted' // ✅ 削除されたものには既読送信不要
         );
@@ -625,6 +610,7 @@ export default function ChatRoomPage() {
                 roomId: Number(roomId),
                 userId: Number(userId),
                 client_id: readClientId,
+                message_client_id: m.client_id,
                 messageId: m.id,
               };
               console.log('📤 presence経由 read送信 payload:', payload);
@@ -659,6 +645,7 @@ export default function ChatRoomPage() {
             isReadyRef.current &&
             presenceSentRef.current &&
             typeof sendMessageRef.current === 'function'
+            
           ) {
             trySendRead();
           } else if (presenceRetryCount < 20) {
@@ -751,9 +738,10 @@ export default function ChatRoomPage() {
 
       return {
         ...msg,
+        id: msg.id,
         text: msg.type === 'deleted'
           ? `${msg.sender}が送信を取り消しました`
-          : (msg.type === 'stamp' ? '' : msg.text),
+          : (msg.type === 'stamp' ? '' : (msg.text ?? '')),
         read_status: msg.sender === username ? msg.read_status : undefined,
         read_by: msg.read_by ?? [],
         type: msg.type,
@@ -788,6 +776,7 @@ export default function ChatRoomPage() {
         (m) =>
           m.sender !== username &&
           m.id > 0 &&
+          m.type !== 'deleted' &&
           !seenReadIds.current.has(`read-${userId}-${roomId}-${m.id}`) &&
           m.type !== 'deleted' // ✅ 削除されたものには既読送信不要
       );
@@ -802,6 +791,7 @@ export default function ChatRoomPage() {
                 roomId: Number(roomId),
                 userId: Number(userId),
                 client_id: readClientId,
+                message_client_id: m.client_id,
                 messageId: m.id,
               };
               console.log('📤 read送信 payload:', payload);
@@ -874,6 +864,55 @@ export default function ChatRoomPage() {
 
     fetchMessages();
   }, [roomId, userId, pathname]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        shouldSendReadRef.current = true;
+        console.log('👀 タブがアクティブに戻ったので unread に read を送信');
+
+        const unreadMessages = messagesRef.current.filter(
+          (m) =>
+            m.sender !== usernameRef.current &&
+            m.id > 0 &&
+            m.type !== 'deleted' &&
+            !seenReadIds.current.has(`read-${userId}-${roomId}-${m.id}`)
+        );
+
+        unreadMessages.forEach((m) => {
+          if (
+            shouldSendReadRef.current &&
+            isReadyRef.current &&
+            presenceSentRef.current &&
+            typeof sendMessageRef.current === 'function'
+          ) {
+            const readClientId = `read-${userId}-${roomId}-${m.id}`;
+            seenReadIds.current.add(readClientId);
+            const payload = {
+              type: 'read',
+              roomId: Number(roomId),
+              userId: Number(userId),
+              client_id: readClientId,
+              message_client_id: m.client_id,
+              messageId: m.id,
+            };
+            console.log('📤 visibilitychange 経由 read送信:', payload);
+            sendMessageRef.current(payload);
+          } else {
+            console.warn('🚫 visibilitychange: 送信条件未達');
+          }
+        });
+      } else {
+        shouldSendReadRef.current = false;
+        console.log('🕶 タブが非アクティブになったので read 一時停止');
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [roomId, userId]);
 
   const sendUserMessage = async () => {
     const token = localStorage.getItem('token');
@@ -1091,56 +1130,87 @@ export default function ChatRoomPage() {
       );
     }
 
-    if (msg.type === 'stamp' && Array.isArray(msg.images) && msg.images.length > 0) {
-      console.log('🧸 stamp message client_id:', msg.client_id, 'msg:', msg);
-      return (
-        <div
-          key={`${key}-${index}`}
+  if (msg.type === 'stamp' && Array.isArray(msg.images) && msg.images.length > 0) {
+    return (
+      <div
+        key={`${key}-${index}`}
+        ref={(el) => {
+          if (msg.client_id) {
+            bubbleRefs.current[msg.client_id] = el;
+          }
+        }}
+        onContextMenu={(e) => handleContextMenu(e, msg)}
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: isMe ? 'flex-end' : 'flex-start',
+          padding: '8px 0',
+          position: 'relative',
+        }}
+      >
+        <div style={{ fontSize: '12px', marginBottom: '4px' }}>{msg.sender}</div>
+        <img
+          src={msg.images[0]}
+          alt={`stamp-${index}`}
           style={{
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: isMe ? 'flex-end' : 'flex-start',
-            padding: '8px 0',
-            position: 'relative',
+            maxWidth: '150px',
+            maxHeight: '150px',
+            objectFit: 'contain',
+            border: 'none',
+            cursor: 'pointer',
           }}
-        >
-          <div style={{ fontSize: '12px', marginBottom: '4px' }}>{msg.sender}</div>
-          <img
-            ref={(el) => {
-              if (msg.client_id) {
-                bubbleRefs.current[msg.client_id] = el;
-              }
-            }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setContextMenu({
-                x: e.clientX,
-                y: e.clientY,
-                msg,
-              });
-            }}
-            src={msg.images[0]}
-            alt={`stamp-${index}`}
+        />
+        {isMe && (
+          <div style={{ fontSize: '11px', color: '#555', marginTop: '4px' }}>
+            {isGroup
+              ? `既読 ${(msg.read_by?.filter((id) => id !== Number(userId)).length) ?? 0}`
+              : msg.read_by && msg.read_by.length > 1
+                ? '既読'
+                : '未読'}
+          </div>
+        )}
+
+        {/* 🎯 右クリックメニュー（スタンプにも表示） */}
+        {contextMenu && contextMenu.msg?.client_id === msg.client_id && (
+          <div
+            onClick={handleCloseContextMenu}
             style={{
-              maxWidth: '150px',
-              maxHeight: '150px',
-              objectFit: 'contain',
-              border: 'none',
-              cursor: 'pointer',
+              position: 'fixed',
+              top: `${contextMenu.y}px`,
+              left: `${contextMenu.x}px`,
+              backgroundColor: '#fff',
+              border: '1px solid #ccc',
+              borderRadius: '6px',
+              zIndex: 1000,
+              padding: '4px 0',
+              minWidth: '120px',
             }}
-          />
-          {isMe && (
-            <div style={{ fontSize: '11px', color: '#555', marginTop: '4px' }}>
-              {isGroup
-                ? `既読 ${(msg.read_by?.filter((id) => id !== Number(userId)).length) ?? 0}`
-                : msg.read_by && msg.read_by.length > 1
-                  ? '既読'
-                  : '未読'}
-            </div>
-          )}
-        </div>
-      );
-    }
+          >
+            {getMenuItemsWithHandlers(contextMenu.msg).map((item, i) => (
+              <div
+                key={i}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  item.onClick();
+                }}
+                style={{
+                  padding: '8px 12px',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  borderBottom:
+                    i !== getMenuItemsWithHandlers(contextMenu.msg).length - 1
+                      ? '1px solid #eee'
+                      : 'none',
+                }}
+              >
+                {item.label}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
 
     if (!isValidMessage) return null;
 
@@ -1266,7 +1336,7 @@ export default function ChatRoomPage() {
             </div>
           )}
 
-    {contextMenu && contextMenu.msg?.client_id === msg.client_id && (
+    {contextMenu?.msg && contextMenu.msg.client_id === msg.client_id && (
       <div
         onClick={handleCloseContextMenu}
         style={{
@@ -1287,6 +1357,7 @@ export default function ChatRoomPage() {
             onClick={(e) => {
               e.stopPropagation(); // ✨追加！
               item.onClick();
+              setContextMenu(null);
             }}
             style={{
               padding: '8px 12px',
