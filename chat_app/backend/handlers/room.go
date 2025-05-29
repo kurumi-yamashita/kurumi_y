@@ -196,11 +196,12 @@ func BroadcastMessage(roomID int, msg ChatMessage) {
 }
 
 type Room struct {
-	ID          int    `json:"id"`
-	Name        string `json:"name"`
-	MemberCnt   int    `json:"member_count"`
-	IsGroup     int    `json:"is_group"`
-	UnreadCount int    `json:"unread_count"`
+	ID           int    `json:"id"`
+	Name         string `json:"name"`
+	MemberCnt    int    `json:"member_count"`
+	IsGroup      int    `json:"is_group"`
+	UnreadCount  int    `json:"unread_count"`
+	MentionCount int    `json:"mention_count"`
 }
 
 func GetOwnedRooms(w http.ResponseWriter, r *http.Request) {
@@ -211,10 +212,12 @@ func GetOwnedRooms(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Println("📥 Fetching owned rooms for userId:", userID)
+
 	rows, err := DB.Query(`
-		SELECT r.id, 
+		SELECT r.id,
 		       COALESCE(NULLIF(r.room_name, ''), (
-		         SELECT u.username 
+		         SELECT u.username
 		         FROM room_members rm
 		         JOIN users u ON u.id = rm.user_id
 		         WHERE rm.room_id = r.id AND rm.user_id != $1
@@ -227,16 +230,31 @@ func GetOwnedRooms(w http.ResponseWriter, r *http.Request) {
 		         WHERE m.room_id = r.id
 		         AND m.sender_id != $1
 		         AND NOT EXISTS (
-		           SELECT 1 FROM message_reads mr WHERE mr.message_id = m.id AND mr.user_id = $1
+		           SELECT 1 FROM message_reads mr
+		           WHERE mr.message_id = m.id AND mr.user_id = $1
 		         )
-		       ) AS unread_count
+		       ) AS unread_count,
+		       (
+		         SELECT COUNT(DISTINCT m.id)
+		         FROM mentions mn
+		         JOIN messages m ON m.id = mn.message_id
+		         WHERE mn.mention_target_id = $1
+		         AND m.room_id = r.id
+		         AND m.sender_id != $1
+		         AND NOT EXISTS (
+		           SELECT 1 FROM message_reads mr
+		           WHERE mr.message_id = m.id AND mr.user_id = $1
+		         )
+		       ) AS mention_count
 		FROM chat_rooms r
 		WHERE r.id IN (
 			SELECT room_id FROM room_members WHERE user_id = $1
 		)
 		ORDER BY r.is_group DESC, r.id
 	`, userID)
+
 	if err != nil {
+		log.Println("❌ SQL error in GetOwnedRooms:", err)
 		writeJSONError(w, "DB取得エラー", http.StatusInternalServerError)
 		return
 	}
@@ -245,12 +263,11 @@ func GetOwnedRooms(w http.ResponseWriter, r *http.Request) {
 	var rooms []Room
 	for rows.Next() {
 		var room Room
-		if err := rows.Scan(&room.ID, &room.Name, &room.IsGroup, &room.MemberCnt, &room.UnreadCount); err == nil {
+		if err := rows.Scan(&room.ID, &room.Name, &room.IsGroup, &room.MemberCnt, &room.UnreadCount, &room.MentionCount); err == nil {
 			rooms = append(rooms, room)
 		}
 	}
 
-	// 明示的に空配列でも [] を返すようにする
 	if rooms == nil {
 		rooms = []Room{}
 	}
@@ -414,10 +431,28 @@ func GetRoomName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var members []string
+	rows, err := DB.Query(`
+		SELECT u.username
+		FROM room_members rm
+		JOIN users u ON rm.user_id = u.id
+		WHERE rm.room_id = $1
+	`, roomID)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var uname string
+			if err := rows.Scan(&uname); err == nil {
+				members = append(members, uname)
+			}
+		}
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"roomName":    roomName,
 		"memberCount": memberCount,
 		"isGroup":     isGroup == 1,
+		"members":     members,
 	})
 }
 

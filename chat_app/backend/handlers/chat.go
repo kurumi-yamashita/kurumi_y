@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -106,10 +107,10 @@ func ChatHandler(w http.ResponseWriter, r *http.Request) {
 
 		var msgID int
 		err = DB.QueryRow(`
-			INSERT INTO messages (room_id, sender_id, content, client_id, created_at, updated_at, type, reply_to_message_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			RETURNING id
-		`, roomID, userID, msgText, input.ClientID, time.Now(), time.Now(), msgType, replyToMessageID).Scan(&msgID)
+		INSERT INTO messages (room_id, sender_id, content, client_id, created_at, updated_at, type, reply_to_message_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING id
+	`, roomID, userID, msgText, input.ClientID, time.Now(), time.Now(), msgType, replyToMessageID).Scan(&msgID)
 		if err != nil {
 			writeJSONError(w, "メッセージ保存エラー", http.StatusInternalServerError)
 			return
@@ -118,9 +119,54 @@ func ChatHandler(w http.ResponseWriter, r *http.Request) {
 
 		for _, image := range input.Images {
 			_, _ = DB.Exec(`
-				INSERT INTO message_attachments (message_id, file_name, created_at)
-				VALUES ($1, $2, $3)
-			`, msgID, image, time.Now())
+			INSERT INTO message_attachments (message_id, file_name, created_at)
+			VALUES ($1, $2, $3)
+		`, msgID, image, time.Now())
+		}
+
+		// 🔽 追加: mention の処理
+		if msgType == "message" {
+			var mentionTargets []int
+
+			// @all → ルームメンバー全員を対象
+			if strings.Contains(msgText, "@all") {
+				rows, err := DB.Query(`SELECT user_id FROM room_members WHERE room_id = $1 AND user_id != $2`, roomID, userID)
+				if err == nil {
+					for rows.Next() {
+						var uid int
+						_ = rows.Scan(&uid)
+						mentionTargets = append(mentionTargets, uid)
+					}
+					rows.Close()
+				}
+			}
+
+			// @username の個別指定を抽出
+			userRows, err := DB.Query(`SELECT u.id, u.username FROM users u JOIN room_members rm ON u.id = rm.user_id WHERE rm.room_id = $1`, roomID)
+			if err == nil {
+				for userRows.Next() {
+					var uid int
+					var uname string
+					_ = userRows.Scan(&uid, &uname)
+					pattern := "@" + uname
+					if strings.Contains(msgText, pattern) && uid != userID {
+						mentionTargets = append(mentionTargets, uid)
+					}
+				}
+				userRows.Close()
+			}
+
+			// 重複除去
+			seen := map[int]bool{}
+			for _, uid := range mentionTargets {
+				if !seen[uid] {
+					_, _ = DB.Exec(`
+					INSERT INTO message_mentions (message_id, target_user_id, created_at)
+					VALUES ($1, $2, $3)
+				`, msgID, uid, time.Now())
+					seen[uid] = true
+				}
+			}
 		}
 
 		msg := ChatMessage{
@@ -144,7 +190,6 @@ func ChatHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		go BroadcastMessage(roomID, msg)
-
 		json.NewEncoder(w).Encode(msg)
 
 	case http.MethodGet:

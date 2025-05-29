@@ -19,6 +19,7 @@ type Room = {
   member_count: number;
   is_group: number;
   unread_count?: number;
+  mention_count: number;
 };
 
 type User = {
@@ -53,34 +54,55 @@ export default function RoomSelection() {
     }
   }, [router]);
 
-  useEffect(() => {
-    const handleUnload = () => {
-      localStorage.removeItem('token');
-      localStorage.removeItem('username');
-      localStorage.removeItem('userId');
-    };
-    window.addEventListener('beforeunload', handleUnload);
-    return () => window.removeEventListener('beforeunload', handleUnload);
-  }, []);
-
   const fetchRooms = async (uid: string) => {
+    console.log('🌐 fetchRooms起動:');
+    console.log("📌 userId:", uid);
+    console.log("📌 fetch URL:", `http://localhost:8080/api/rooms/owned?userId=${uid}`);
     try {
+      // 🔍 入力値確認
+      console.log("🧩 fetchRooms(): uid =", uid);
+
       const [userRes, joinRes] = await Promise.all([
-        fetch(`http://localhost:8080/api/rooms/owned?userId=${uid}`),
+        fetch(`http://localhost:8080/api/rooms/owned?userId=${uid}&username=${username}`),
         fetch(`http://localhost:8080/api/rooms/available?userId=${uid}`)
       ]);
-      if (!userRes.ok || !joinRes.ok) throw new Error('API error');
+
+      // 🔍 APIレスポンスのHTTPステータス確認
+      console.log("📡 /owned status:", userRes.status);
+      console.log("📡 /available status:", joinRes.status);
+
+      if (!userRes.ok || !joinRes.ok) {
+        console.error("⚠️ fetch error (not ok):", {
+          owned: userRes.statusText,
+          available: joinRes.statusText
+        });
+        throw new Error('API error');
+      }
+
       const userData: Room[] = await userRes.json();
       const joinData: Room[] = await joinRes.json();
+
+      // 🔍 データの中身確認
+      console.log("📦 userData:", userData);
+      console.log("📦 joinData:", joinData);
+
       const groupOnly = (joinData ?? []).filter(r => r.is_group === 1);
 
-      if (!Array.isArray(userData)) throw new Error('userData is not array');
+      if (!Array.isArray(userData)) {
+        console.error("❌ userData is not array:", userData);
+        throw new Error('userData is not array');
+      }
 
       const group = ((userData ?? []).filter(r => r.is_group === 1));
       const oneToOne = ((userData ?? []).filter(r => r.is_group === 0));
 
+      // 🔍 フィルタ結果確認
+      console.log("🏠 group:", group);
+      console.log("👤 1on1:", oneToOne);
+      console.log("🟢 joinable group:", groupOnly);
+
       setGroupRooms(group);
-      setOneToOneRooms(oneToOne); // ← 新しく 1on1 専用 state に分離表示
+      setOneToOneRooms(oneToOne);
       setJoinableRooms(groupOnly);
     } catch (err) {
       console.error('❌ fetchRooms失敗:', err);
@@ -336,6 +358,7 @@ export default function RoomSelection() {
                     }}
                   >
                     未読 {room.unread_count}
+                    {room.mention_count > 0 && ` / メンション ${room.mention_count}`}
                   </span>
                 )}
               </div>
