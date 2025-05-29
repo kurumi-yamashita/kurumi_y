@@ -67,6 +67,10 @@ export default function ChatRoomPage() {
   const [showStampPicker, setShowStampPicker] = useState(false);
   const [stampToSend, setStampToSend] = useState<string | null>(null);
   const [isOnlyStamp, setIsOnlyStamp] = useState(false);
+  const [showMentionList, setShowMentionList] = useState(false);
+  const [mentionCandidates, setMentionCandidates] = useState<string[]>([]);
+  const [caretPosition, setCaretPosition] = useState<{ top: number; left: number } | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleContextMenu = (e: React.MouseEvent, msg: Message) => {
     e.preventDefault();
@@ -856,9 +860,23 @@ export default function ChatRoomPage() {
     fetch(`http://localhost:8080/api/rooms/name?roomId=${roomId}&userId=${userId}`)
       .then((res) => res.json())
       .then((data) => {
+        console.log("🟡 fetch結果:", data);
         setRoomName(data.roomName);
         setMemberCount(data.memberCount);
         setIsGroup(data.isGroup === true);
+        console.log('🟡 data:', data);
+        console.log('🟡 data.members:', data?.members);
+        console.log('🟡 typeof data.members:', typeof data?.members);
+        if (data.members && Array.isArray(data.members)) {
+          const others = data.members.filter((m: string) => m !== username);
+          const mentions = ['@all', ...others.map((m: string) => `@${m}`)];
+          setMentionCandidates(mentions);
+
+          // ⭐ここで候補一覧を確認
+          console.log('📌 mention 候補一覧:', mentions);
+          console.log('🧑‍🤝‍🧑 username:', username);
+          console.log('🧑‍🤝‍🧑 data.members:', data.members);
+        }
       })
       .catch((err) => console.error('ルーム名取得失敗:', err));
 
@@ -1447,8 +1465,34 @@ export default function ChatRoomPage() {
           </div>
         )}
         <textarea
+          ref={textareaRef}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            const val = e.target.value;
+            setText(val);
+
+            const cursorPos = e.target.selectionStart ?? val.length;
+            const textBefore = val.slice(0, cursorPos);
+            console.log("はしれ～～～@@@");
+
+            // 末尾が「空白＋@」または「先頭が@」だったら候補を出す
+            const mentionTrigger = /(?:^|\s)([@＠])$/;
+            if (isGroup && mentionTrigger.test(textBefore)) {
+              console.log("させ～～～@@@");
+              const rect = e.target.getBoundingClientRect();
+              setCaretPosition({
+                top: rect.top + window.scrollY - 40,
+                left: rect.left + 4,
+              });
+              console.log("🔍 @検出: showMentionList ON", {
+                top: rect.top + window.scrollY - 40,
+                left: rect.left + 4,
+              });
+              setShowMentionList(true);
+            } else {
+              setShowMentionList(false);
+            }
+          }}
           rows={3}
           style={{
             padding: '8px',
@@ -1463,6 +1507,55 @@ export default function ChatRoomPage() {
             wordBreak: 'break-word',
           }}
         />
+        {showMentionList && caretPosition && (
+          <div
+            style={{
+              position: 'fixed',
+              bottom: `225px`,
+              left: caretPosition.left,
+              backgroundColor: '#fff',
+              border: '1px solid #ccc',
+              borderRadius: '6px',
+              boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
+              zIndex: 1000,
+              padding: '4px',
+              fontSize: '14px',
+            }}
+          >
+            {mentionCandidates.map((mention, i) => (
+              <div
+                key={i}
+                onClick={() => {
+                  if (!textareaRef.current) return;
+                  const cursorPos = textareaRef.current.selectionStart ?? text.length;
+
+                  // 最後に入力された「@」の直前までの文字列と後ろの文字列を取得
+                  const beforeAt = text.slice(0, cursorPos).replace(/[@＠]$/, '');
+                  const afterAt = text.slice(cursorPos);
+
+                  const newText = beforeAt + mention + ' ' + afterAt;
+                  setText(newText);
+
+                  // カーソルを新しい位置に戻す
+                  setTimeout(() => {
+                    textareaRef.current?.focus();
+                    const newPos = (beforeAt + mention + ' ').length;
+                    textareaRef.current?.setSelectionRange(newPos, newPos);
+                  }, 0);
+
+                  setShowMentionList(false);
+                }}
+                style={{
+                  padding: '6px 8px',
+                  cursor: 'pointer',
+                  borderBottom: i !== mentionCandidates.length - 1 ? '1px solid #eee' : 'none'
+                }}
+              >
+                {mention}
+              </div>
+            ))}
+          </div>
+        )}
                 <button
           onClick={toggleStampPicker}
           style={{
